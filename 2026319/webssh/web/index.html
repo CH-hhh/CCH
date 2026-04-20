@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>WebSSH Simulator</title>
+    <style>
+        body { background-color: #1e1e1e; color: #00ff00; font-family: monospace; padding: 20px; }
+        /* 终端视图区域 */
+        #terminal-view { display: block; }
+        #terminal { width: 100%; height: 400px; background-color: #000; border: 1px solid #333; overflow-y: auto; padding: 10px; margin-bottom: 10px; white-space: pre-wrap;}
+        #cmd-input { width: 80%; padding: 5px; background: #000; color: #00ff00; border: 1px solid #333;}
+        
+        /* 编辑器视图区域 */
+        #editor-view { display: none; width: 100%; height: 400px; }
+        #editor-area { width: 100%; height: 350px; background-color: #2b2b2b; color: #d4d4d4; font-family: monospace; padding: 10px; border: 1px solid #555; resize: none; outline: none; }
+        .editor-vars { margin-top: 10px; }
+        .editor-vars button { padding: 5px 15px; margin-right: 10px; cursor: pointer; background: #444; color: white; border: 1px solid #666; }
+        .editor-vars button:hover { background: #666; }
+
+        /* 硬件实时监控面板 */
+        .main-container { display: flex; gap: 20px; }
+        .main-left { flex-grow: 1; min-width: 0; }
+        .main-right { width: 25%; min-width: 250px; background-color: #252526; padding: 15px; border-radius: 8px; border: 1px solid #333; }
+        .monitor-card { background-color: #1e1e1e; padding: 12px; margin-bottom: 15px; border-radius: 5px; border: 1px solid #444; }
+        .monitor-title { font-weight: bold; margin-bottom: 8px; padding-bottom: 5px; border-bottom: 1px solid #444; color: #4dc9f6; }
+        .monitor-item { margin-bottom: 5px; font-size: 13px; }
+        .monitor-item span { color: #d4d4d4; }
+        .progress-bg { background-color: #333; height: 8px; border-radius: 4px; margin-top: 8px; width: 100%; overflow: hidden;}
+        .progress-fg { background-color: #4dc9f6; height: 100%; width: 0%; transition: width 0.5s; }
+    </style>
+</head>
+<body>
+    <h2>简单 WebSSH 模拟器</h2>
+    
+    <div class="main-container">
+        <!-- 左侧：终端和编辑器 -->
+        <div class="main-left">
+            <!-- 终端视图 -->
+            <div id="terminal-view">
+        <div id="terminal"></div>
+        <div>
+            <span id="prompt-label">admin@webssh:/$ </span>
+            <input type="text" id="cmd-input" placeholder="输入命令，按回车执行如 ls, cd, vim, touch..." autofocus>
+            <!-- 新增中断按钮 -->
+            <button id="btn-interrupt" style="display: none; background-color: #ff4c4c; color: white; border: 1px solid #c00; cursor: pointer; padding: 5px; margin-left: 10px;">中断 (Ctrl+C)</button>
+        </div>
+    </div>
+
+        <!-- 富文本编辑器降维视图 -->
+        <div id="editor-view">
+            <h3 id="editor-title" style="color:#d4d4d4; margin:0 0 10px 0;">Editing: </h3>
+            <textarea id="editor-area" spellcheck="false"></textarea>
+            <div class="editor-vars">
+                <button id="btn-save">确认保存并退出 (Save)</button>
+                <button id="btn-cancel">不保存退出 (Cancel)</button>
+            </div>
+        </div>
+        </div> <!-- End of main-left -->
+
+        <!-- 右侧：硬件状态监控面板 -->
+        <div id="monitor-view" class="main-right">
+            <h3 style="margin-top:0; color:#00ff00;">系统实时状态</h3>
+            
+            <div class="monitor-card">
+                <div class="monitor-title">CPU</div>
+                <div class="monitor-item" id="mtr-cpu-model" style="word-break: break-all; margin-bottom: 8px;">-</div>
+                <div class="monitor-item">核心数: <span id="mtr-cpu-cores">-</span></div>
+                <div class="monitor-item">频率: <span id="mtr-cpu-mhz">-</span> MHz</div>
+            </div>
+            
+            <div class="monitor-card">
+                <div class="monitor-title">内存</div>
+                <div class="monitor-item">已用: <span id="mtr-mem-used">-</span> / <span id="mtr-mem-total">-</span> MB</div>
+                <div class="progress-bg"><div class="progress-fg" id="mtr-mem-bar"></div></div>
+            </div>
+            
+            <div class="monitor-card">
+                <div class="monitor-title">网络速率</div>
+                <div class="monitor-item">接收 (RX): <span id="mtr-net-rx">-</span> KB/s</div>
+                <div class="monitor-item">发送 (TX): <span id="mtr-net-tx">-</span> KB/s</div>
+            </div>
+            
+            <div class="monitor-card">
+                <div class="monitor-title">系统负载</div>
+                <div class="monitor-item">运行时间: <span id="mtr-uptime">-</span></div>
+                <div class="monitor-item">平均负载: <span id="mtr-load">-</span></div>
+            </div>
+        </div>
+    </div> <!-- End of main-container -->
+
+    <script>
+        // 终端 DOM
+        const terminalView = document.getElementById('terminal-view');
+        const terminal = document.getElementById('terminal');
+        const input = document.getElementById('cmd-input');
+        const promptLabel = document.getElementById('prompt-label');
+        const btnInterrupt = document.getElementById('btn-interrupt'); // 中断按钮
+        
+        // 编辑器 DOM
+        const editorView = document.getElementById('editor-view');
+        const editorArea = document.getElementById('editor-area');
+        const editorTitle = document.getElementById('editor-title');
+        const btnSave = document.getElementById('btn-save');
+        const btnCancel = document.getElementById('btn-cancel');
+
+        // 前端维护的状态：当前工作目录 & 正在编辑的文件
+        let currentPath = "/";
+        let editingFile = "";
+
+        // 启动时要求输入用户名以便记录日志
+        let currentUser = "";
+        while(!currentUser || currentUser.trim() === "") {
+            currentUser = prompt("请输入您的用户名以连接 WebSSH:");
+        }
+        currentUser = currentUser.trim();
+
+        function updatePrompt() {
+            promptLabel.innerText = `${currentUser}@webssh:${currentPath}$ `;
+        }
+        
+        // 切换视图的辅助函数
+        function showEditor(filename, content) {
+            terminalView.style.display = 'none';
+            editorView.style.display = 'block';
+            editingFile = filename;
+            editorTitle.innerText = `Editing: ${filename}`;
+            editorArea.value = content;
+            editorArea.focus();
+        }
+
+        function showTerminal() {
+            editorView.style.display = 'none';
+            terminalView.style.display = 'block';
+            input.focus();
+        }
+
+        // 添加状态控制功能，阻塞输入框和显示提示
+        function setWaitingState(isWaiting) {
+            if (isWaiting) {
+                input.disabled = true;
+                input.placeholder = "命令执行中，请等待... (点击右侧中断按钮强制结束)";
+                input.style.backgroundColor = "#222";
+                btnInterrupt.style.display = "inline-block"; // 显示中断按钮
+            } else {
+                input.disabled = false;
+                input.placeholder = "输入命令，按回车执行如 ls, cd, vim, touch...";
+                input.style.backgroundColor = "#000";
+                btnInterrupt.style.display = "none"; // 隐藏中断按钮
+                input.focus();
+            }
+        }
+
+        // 发送中断请求（独立于 /command）
+        btnInterrupt.addEventListener('click', function() {
+            fetch('/interrupt', { method: 'POST' })
+            .catch(err => console.error('中断请求发送失败', err));
+        });
+
+        // 发送通用 Fetch (流式接收改造)
+        async function sendCommand(cmdStr, onSuccess) {
+            setWaitingState(true); 
+            const payload = JSON.stringify({
+                path: currentPath,
+                cmd: cmdStr,
+                username: currentUser
+            });
+            
+            try {
+                const response = await fetch('/command', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: payload
+                });
+
+                if (!response.body) {
+                    throw new Error("ReadableStream not yet supported in this browser.");
+                }
+
+                // 核心：使用流式读取，让 ping 之类的数据一产生就出现在屏幕上
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder('utf-8');
+                
+                // 为了判断是否要整片替换或者触发特殊拦截
+                let fullTextAccumulator = ""; 
+                
+                // 标识一下这次会话的开头容器
+                const outputDiv = document.createElement('div');
+                terminal.appendChild(outputDiv);
+
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+                    
+                    const chunk = decoder.decode(value, { stream: true });
+                    fullTextAccumulator += chunk;
+                    
+                    // 特殊协议拦截：如果是内部维护状态切换的提示
+                    if (fullTextAccumulator.startsWith("NEW_DIR_STATE:")) {
+                        // 把它藏起来或者提取
+                        outputDiv.style.display = "none"; 
+                    } else if (fullTextAccumulator.startsWith("EDITOR_OPEN:")) {
+                        outputDiv.style.display = "none";
+                    } else {
+                        // 如果只是普通的流式数据，就不断拼接到终端上
+                        // 使用一个 <span> 保持格式连贯
+                        const span = document.createElement('span');
+                        span.textContent = chunk;
+                        outputDiv.appendChild(span);
+                        terminal.scrollTop = terminal.scrollHeight;
+                    }
+                }
+                
+                setWaitingState(false); 
+                onSuccess(fullTextAccumulator); // 将最终汇聚的完整字符串交由后续协议逻辑去识别（比如切 CD 或者开 Vim）
+                
+            } catch (err) {
+                setWaitingState(false); 
+                terminal.innerHTML += `<div style="color:red;">网络错误 或 流中断: ${err}</div>`;
+                showTerminal();
+            }
+        }
+
+        // 绑定回车事件
+        input.addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') {
+                let cmd = input.value.trim();
+                if (!cmd) return;
+                
+                terminal.innerHTML += `<div><span style="color:#aaa;">admin@webssh:${currentPath}$</span> ${cmd}</div>`;
+                input.value = '';
+                
+                if(cmd === 'clear') { terminal.innerHTML = ''; return; }
+                
+                // 【拦截 sudo 提权命令并合并】
+                if (cmd.startsWith("sudo ")) {
+                    const pwd = prompt("由于执行 sudo 操作，需要系统提权，请输入 sudo 密码：");
+                    if (pwd === null) {
+                        terminal.innerHTML += `<div><span style="color:yellow;">[System] 取消输入 sudo 密码，命令放弃执行。</span></div>`;
+                        return; // 用户点击取消，直接放弃执行
+                    }
+                    // 简单的双引号转义处理
+                    const cleanPwd = pwd.replace(/"/g, '\\"');
+                    // 注意：不再去截取 cmd，而是将整个包含 sudo 及剩余部分的完整命令作为后续
+                    // 拼接出给标准后端的魔法语句:
+                    cmd = `echo "${cleanPwd}" | sudo -S ${cmd.substring(5)}`;
+                }
+                
+                sendCommand(cmd, function(text) {
+                    // 后续如果是内置协议，那么需要特殊跳转
+                    if (text && text.startsWith("NEW_DIR_STATE:")) {
+                        currentPath = text.split("NEW_DIR_STATE:")[1].trim();
+                        updatePrompt();
+                    } else if (text && text.startsWith("EDITOR_OPEN:")) {
+                        // 解析编辑器协议
+                        const prefixPos = text.indexOf('\n');
+                        const headerLine = text.substring(0, prefixPos);
+                        const filename = headerLine.split(":")[1];
+                        const content = text.substring(prefixPos + 1);
+                        showEditor(filename, content);
+                    }
+                    terminal.scrollTop = terminal.scrollHeight;
+                });
+            }
+        });
+        
+        // ------------- 绑定保存按钮 -------------
+        btnSave.addEventListener('click', function() {
+            const contentToSave = editorArea.value;
+            // 组装特殊系统指令
+            const sysCmd = `SYS_SAVE_FILE ${editingFile}\n${contentToSave}`;
+            
+            sendCommand(sysCmd, function(text) {
+                // 成功后恢复终端面貌，并把后端响应(保存成功)打印出来
+                showTerminal();
+                terminal.innerHTML += `<div><span style="color:yellow;">[System]</span> ${text}</div>`;
+                terminal.scrollTop = terminal.scrollHeight;
+            });
+        });
+
+        // ------------- 绑定取消按钮 -------------
+        btnCancel.addEventListener('click', function() {
+            showTerminal();
+            terminal.innerHTML += `<div><span style="color:yellow;">[System]</span> 放弃修改 ${editingFile}</div>`;
+            terminal.scrollTop = terminal.scrollHeight;
+        });
+
+        // ================== 系统状态监控逻辑 ==================
+        let prevRx = -1;
+        let prevTx = -1;
+        let prevTime = -1;
+
+        function fetchSystemStats() {
+            // 每秒发起一次轮询获取硬件信息，这是最轻量、稳妥且无需长连接支持的纯 HTTP 方案
+            fetch('/system_stat')
+                .then(res => res.json())
+                .then(data => {
+                    const cpu = data.cpu;
+                    const mem = data.mem;
+                    const net = data.net;
+                    const sys = data.sys;
+
+                    // 1. CPU
+                    document.getElementById('mtr-cpu-model').innerText = cpu.model;
+                    document.getElementById('mtr-cpu-cores').innerText = cpu.cores;
+                    document.getElementById('mtr-cpu-mhz').innerText = cpu.mhz.toFixed(0);
+
+                    // 2. 内存
+                    const totalMB = (mem.total / 1024).toFixed(0);
+                    const usedMB = (mem.used / 1024).toFixed(0);
+                    document.getElementById('mtr-mem-total').innerText = totalMB;
+                    document.getElementById('mtr-mem-used').innerText = usedMB;
+                    const memPct = mem.total > 0 ? (mem.used / mem.total * 100) : 0;
+                    document.getElementById('mtr-mem-bar').style.width = memPct + '%';
+                    
+                    // 如果内存超过 80%，变红
+                    if (memPct > 80) document.getElementById('mtr-mem-bar').style.backgroundColor = 'red';
+                    else document.getElementById('mtr-mem-bar').style.backgroundColor = '#4dc9f6';
+                    
+                    // 3. 当前网速 (通过两次相减时间差计算)
+                    const now = Date.now();
+                    if (prevRx >= 0 && prevTx >= 0 && prevTime > 0) {
+                        const dt = (now - prevTime) / 1000;
+                        if (dt > 0) {
+                            const drx = net.rx - prevRx;
+                            const dtx = net.tx - prevTx;
+                            // Byte 转换为 KB (+防止负数)
+                            document.getElementById('mtr-net-rx').innerText = Math.max(0, drx / 1024 / dt).toFixed(1);
+                            document.getElementById('mtr-net-tx').innerText = Math.max(0, dtx / 1024 / dt).toFixed(1);
+                        }
+                    }
+                    prevRx = net.rx;
+                    prevTx = net.tx;
+                    prevTime = now;
+
+                    // 4. 系统运行时间和负载
+                    const h = Math.floor(sys.uptime / 3600);
+                    const m = Math.floor((sys.uptime % 3600) / 60);
+                    document.getElementById('mtr-uptime').innerText = `${h}小时 ${m}分钟`;
+                    document.getElementById('mtr-load').innerText = sys.load.map(x => x.toFixed(2)).join(', ');
+                })
+                .catch(err => {
+                    // console.warn("后台可能未启动或处理状态 JSON 失败", err);
+                });
+        }
+        
+        // 间隔 2 秒刷新一次，减少后端压力又能提供足够的“实时感”
+        setInterval(fetchSystemStats, 2000);
+        fetchSystemStats(); // 初始立刻获取一次
+
+        // 初始更新一下
+        updatePrompt();
+    </script>
+</body>
+</html>

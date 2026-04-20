@@ -1,0 +1,34 @@
+# 1. 基础目录与信息查询
+pwd
+whoami
+date
+uname -a
+ls -la
+ls -la src/
+
+# 2. 文本阅读（自动防卡死拦截并代理）
+cat src/main.c
+vi src/server.c
+nano Makefile
+less static/index.html
+
+# 3. 阻塞和危险行为命令（自动 timeout 沙箱处理）
+ping 127.0.0.1
+top
+tail -f src/server.c
+cat
+
+# 4. 目录跳转测试（真正的环境状态切换）
+cd ..
+pwd
+ls
+cd webserver
+pwd
+cd ~
+pwd
+
+# 5. 编译与复杂命令支持
+gcc --version
+echo "hello web terminal" > hello.txt
+cat hello.txt
+rm hello.txt
